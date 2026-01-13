@@ -44,16 +44,32 @@ git clone <repository-url>
 cd "aiXplain Certification Project"
 ```
 
-### 2. Create Virtual Environment
+### 2. Create Virtual Environment (recommended)
+Use a dedicated virtual environment for this project to avoid dependency conflicts.
+
+macOS / Linux
 ```bash
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+python3 -m venv venv
+source venv/bin/activate
 ```
 
-### 3. Install Dependencies
+Windows (PowerShell)
+```powershell
+python -m venv venv
+.\venv\Scripts\Activate.ps1
+```
+
+### 3. Install Dependencies (inside `venv`)
+After activating the venv, install pinned dependencies:
+
 ```bash
+python -m pip install --upgrade pip setuptools wheel
 pip install -r requirements.txt
 ```
+
+Notes:
+- If you prefer to use the system Python, install packages into a virtualenv or container.
+- `requirements.txt` includes test and runtime dependencies (`pytest`, `streamlit`, `loguru`, etc.).
 
 ### 4. Environment Configuration
 Copy the example environment file and fill in your API keys:
@@ -113,12 +129,22 @@ This script:
 - Generates embeddings using Sentence-Transformers
 - Stores in ChromaDB at `data/vector_store/`
 
-### 3. Run Web Interface
+### Run Web Interface (Streamlit)
+Start the Streamlit UI after creating and activating the venv and installing dependencies:
+
 ```bash
-streamlit run streamlit_app.py
+source venv/bin/activate        # macOS/Linux
+# on Windows: .\venv\Scripts\Activate.ps1 (PowerShell) or venv\Scripts\activate (cmd)
+streamlit run streamlit_app.py --server.port 8501
 ```
 
-Visit `http://localhost:8501` in your browser
+Then visit `http://localhost:8501` in your browser.
+
+If `streamlit` fails to import, make sure you're using the same Python interpreter that has the venv activated. If you get `ModuleNotFoundError: No module named 'loguru'`, the project includes a lightweight fallback (`loguru.py`) so the app can run even if the `loguru` package isn't installed. Installing the real `loguru` in the venv is recommended:
+
+```bash
+pip install loguru
+```
 
 ### 4. Run Tests
 ```bash
