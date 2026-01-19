@@ -1,4 +1,4 @@
-# Policy Navigator Agent 🏛️
+# Policy Navigator Agent
 
 A sophisticated multi-agent system for intelligent policy navigation, compliance tracking, and regulatory analysis using Retrieval-Augmented Generation (RAG) with the aiXplain SDK.
 
@@ -40,7 +40,7 @@ Policy Navigator (Orchestrator)
 
 ### 1. Clone Repository
 ```bash
-git clone <repository-url>
+git clone [<repository-url>](https://github.com/AK-Github-0/policy-navigator-agent)
 cd "aiXplain Certification Project"
 ```
 
