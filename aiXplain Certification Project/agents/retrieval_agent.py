@@ -1,12 +1,22 @@
 """
 Retrieval Agent - Handles vector database operations
-Manages document storage and semantic search using ChromaDB
+Uses aiXplain SDK IndexFactory for document management and semantic search
 """
 
 from typing import Dict, List, Any
 from loguru import logger
+from datetime import datetime
 
-# Optional imports - tests will patch these module-level names.
+# Import aiXplain SDK components
+try:
+    from aixplain.factories import IndexFactory
+    from aixplain.enums import SortBy
+    AIXPLAIN_AVAILABLE = True
+except ImportError:
+    logger.warning("aiXplain SDK not available - using fallback mode")
+    AIXPLAIN_AVAILABLE = False
+
+# Optional imports for fallback
 try:
     import chromadb
 except Exception:
@@ -26,12 +36,13 @@ except Exception:
 class RetrievalAgent:
     """
     Agent responsible for semantic search and document retrieval
-    Uses ChromaDB for vector storage and SentenceTransformers for embeddings
+    Uses aiXplain SDK IndexFactory for vector storage and retrieval
+    Falls back to ChromaDB if aiXplain SDK is unavailable
     """
     
     def __init__(self, config):
         """
-        Initialize retrieval agent with vector database
+        Initialize retrieval agent with aiXplain Index
         
         Args:
             config: Configuration object
@@ -39,57 +50,62 @@ class RetrievalAgent:
         logger.info("Initializing Retrieval Agent")
         
         self.config = config
+        self.use_aixplain = AIXPLAIN_AVAILABLE
         
-        # Initialize embedding model
-        # Initialize embedding model if available; otherwise defer to tests
-        # which typically patch `agents.retrieval_agent.SentenceTransformer`.
-        self.embedder = None
-        # keep model id for tests and callers
-        self.embedding_model = getattr(config, 'embedding_model', 'sentence-transformers/all-MiniLM-L6-v2')
-
-        if SentenceTransformer is not None:
+        # Initialize aiXplain Index
+        if self.use_aixplain:
             try:
+                logger.info("Initializing aiXplain IndexFactory")
+                self.index = IndexFactory.create(
+                    name="policy_documents_index",
+                    description="Index for policy documents in RAG system",
+                    team_id=config.aixplain_team_id,
+                    api_key=config.aixplain_api_key
+                )
+                logger.success("aiXplain Index initialized")
+            except Exception as e:
+                logger.error(f"Error initializing aiXplain Index: {str(e)}")
+                self.use_aixplain = False
+                self.index = None
+        else:
+            self.index = None
+        
+        # Fallback to ChromaDB if needed
+        self.embedder = None
+        self.client = None
+        self.collection = None
+        self.embedding_model = getattr(config, 'embedding_model', 'sentence-transformers/all-MiniLM-L6-v2')
+        
+        if not self.use_aixplain:
+            logger.info("Using fallback ChromaDB for vector storage")
+            self._init_chromadb()
+    
+    def _init_chromadb(self):
+        """Initialize ChromaDB as fallback"""
+        try:
+            if SentenceTransformer is not None:
                 self.embedder = SentenceTransformer(
                     self.embedding_model,
                     device='cpu'
                 )
                 logger.success("Embedding model loaded")
-            except Exception as e:
-                logger.error(f"Error loading embedding model: {str(e)}")
-                self.embedder = None
-        
-        # Initialize ChromaDB
-        # Initialize ChromaDB client if available; tests patch
-        # `agents.retrieval_agent.chromadb` when needed.
-        self.client = None
-        self.collection = None
-        if chromadb is not None:
-            try:
+            
+            if chromadb is not None:
                 self.client = chromadb.PersistentClient(
-                    path=str(config.vector_store_path)
+                    path=str(self.config.vector_store_path)
                 )
-                # use get_or_create_collection where available
-                # prefer `get_collection` when available (tests commonly set it);
-                # otherwise fall back to `get_or_create_collection`.
-                if callable(getattr(self.client, 'get_collection', None)):
-                    self.collection = self.client.get_collection("policy_documents")
-                elif callable(getattr(self.client, 'get_or_create_collection', None)):
+                if callable(getattr(self.client, 'get_or_create_collection', None)):
                     self.collection = self.client.get_or_create_collection(
                         name="policy_documents",
                         metadata={"hnsw:space": "cosine"}
                     )
-                else:
-                    self.collection = None
-
-                logger.success("Vector database initialized")
-            except Exception as e:
-                logger.error(f"Error initializing vector database: {str(e)}")
-                self.client = None
-                self.collection = None
+                logger.success("ChromaDB fallback initialized")
+        except Exception as e:
+            logger.error(f"Error initializing ChromaDB fallback: {str(e)}")
     
     def create_embedding(self, text: str) -> List[float]:
         """
-        Create embedding for text
+        Create embedding for text using aiXplain or local embeddings
         
         Args:
             text: Text to embed
@@ -97,22 +113,41 @@ class RetrievalAgent:
         Returns:
             list: Embedding vector
         """
-        try:
-            if not self.embedder:
-                logger.warning("No embedder available, returning empty embedding")
+        if self.use_aixplain:
+            try:
+                # Use aiXplain for embeddings
+                from aixplain.factories import ModelFactory
+                
+                embedding_model = ModelFactory.get_model(
+                    model_id="6502d91a8e10e26495e3f789",  # aiXplain embedding model
+                    api_key=self.config.aixplain_api_key
+                )
+                
+                result = embedding_model.run(text)
+                if hasattr(result, 'embedding'):
+                    return result.embedding
+                else:
+                    logger.warning("Unable to extract embedding from aiXplain response")
+                    return []
+            except Exception as e:
+                logger.error(f"Error creating embedding with aiXplain: {str(e)}")
                 return []
-
-            raw = self.embedder.encode(text)
-            # handle numpy arrays and plain lists
-            if hasattr(raw, 'tolist'):
-                embedding = raw.tolist()
-            else:
-                embedding = list(raw)
-
-            return embedding
-        except Exception as e:
-            logger.error(f"Error creating embedding: {str(e)}")
-            return []
+        else:
+            # Fallback to local embeddings
+            try:
+                if not self.embedder:
+                    logger.warning("No embedder available, returning empty embedding")
+                    return []
+                
+                raw = self.embedder.encode(text)
+                if hasattr(raw, 'tolist'):
+                    embedding = raw.tolist()
+                else:
+                    embedding = list(raw)
+                return embedding
+            except Exception as e:
+                logger.error(f"Error creating embedding: {str(e)}")
+                return []
     
     def add_document(
         self,
@@ -122,7 +157,7 @@ class RetrievalAgent:
         source: str = None
     ) -> bool:
         """
-        Add single document to vector database
+        Add single document to index using aiXplain or ChromaDB
         
         Args:
             document_id: Unique document identifier
@@ -136,31 +171,44 @@ class RetrievalAgent:
         logger.info(f"Adding document: {document_id}")
         
         try:
-            # Create embedding
-            embedding = self.create_embedding(content)
-            
-            if not embedding:
-                logger.error(f"Failed to create embedding for {document_id}")
-                return False
-            
-            # Prepare metadata
-            if metadata is None:
-                metadata = {}
-            
-            if source:
-                metadata['source'] = source
-            
-            # Add to collection
-            self.collection.add(
-                ids=[document_id],
-                embeddings=[embedding],
-                documents=[content],
-                metadatas=[metadata]
-            )
-            
-            logger.success(f"Document added: {document_id}")
-            return True
-            
+            if self.use_aixplain and self.index:
+                # Use aiXplain Index
+                doc_metadata = metadata or {}
+                if source:
+                    doc_metadata['source'] = source
+                
+                self.index.add_file(
+                    file_path=None,
+                    text=content,
+                    metadata=doc_metadata,
+                    reference_id=document_id
+                )
+                logger.success(f"Document added via aiXplain: {document_id}")
+                return True
+            else:
+                # Use ChromaDB fallback
+                if not self.collection:
+                    logger.error("No vector store available")
+                    return False
+                
+                embedding = self.create_embedding(content)
+                if not embedding:
+                    logger.error(f"Failed to create embedding for {document_id}")
+                    return False
+                
+                doc_metadata = metadata or {}
+                if source:
+                    doc_metadata['source'] = source
+                
+                self.collection.add(
+                    ids=[document_id],
+                    embeddings=[embedding],
+                    documents=[content],
+                    metadatas=[doc_metadata]
+                )
+                logger.success(f"Document added via ChromaDB: {document_id}")
+                return True
+                
         except Exception as e:
             logger.error(f"Error adding document: {str(e)}")
             return False
@@ -170,7 +218,7 @@ class RetrievalAgent:
         documents: List[Dict[str, Any]]
     ) -> int:
         """
-        Add multiple documents in batch
+        Add multiple documents in batch using aiXplain or ChromaDB
         
         Args:
             documents: List of documents with 'id', 'content', 'metadata'
@@ -181,41 +229,63 @@ class RetrievalAgent:
         logger.info(f"Adding {len(documents)} documents in batch")
         
         try:
-            ids = []
-            embeddings = []
-            contents = []
-            metadatas = []
+            added_count = 0
             
-            for doc in documents:
-                doc_id = doc.get('id') or f"doc_{len(ids)}"
-                content = doc.get('content', '')
-                metadata = doc.get('metadata', {})
+            if self.use_aixplain and self.index:
+                # Use aiXplain Index for batch operations
+                for doc in documents:
+                    doc_id = doc.get('id') or f"doc_{added_count}"
+                    content = doc.get('content', '')
+                    metadata = doc.get('metadata', {})
+                    
+                    self.index.add_file(
+                        file_path=None,
+                        text=content,
+                        metadata=metadata,
+                        reference_id=doc_id
+                    )
+                    added_count += 1
                 
-                # Create embedding
-                embedding = self.create_embedding(content)
-                
-                if embedding:
-                    ids.append(doc_id)
-                    embeddings.append(embedding)
-                    contents.append(content)
-                    metadatas.append(metadata)
-            
-            if ids:
-                self.collection.add(
-                    ids=ids,
-                    embeddings=embeddings,
-                    documents=contents,
-                    metadatas=metadatas
-                )
-                logger.success(f"Added {len(ids)} documents to database")
-                return len(ids)
+                logger.success(f"Added {added_count} documents via aiXplain")
+                return added_count
             else:
-                logger.warning("No documents to add")
-                return 0
+                # Use ChromaDB fallback
+                if not self.collection:
+                    logger.error("No vector store available")
+                    return 0
+                
+                ids = []
+                embeddings = []
+                contents = []
+                metadatas = []
+                
+                for doc in documents:
+                    doc_id = doc.get('id') or f"doc_{len(ids)}"
+                    content = doc.get('content', '')
+                    metadata = doc.get('metadata', {})
+                    
+                    embedding = self.create_embedding(content)
+                    
+                    if embedding:
+                        ids.append(doc_id)
+                        embeddings.append(embedding)
+                        contents.append(content)
+                        metadatas.append(metadata)
+                
+                if ids:
+                    self.collection.add(
+                        ids=ids,
+                        embeddings=embeddings,
+                        documents=contents,
+                        metadatas=metadatas
+                    )
+                    logger.success(f"Added {len(ids)} documents via ChromaDB")
+                    return len(ids)
                 
         except Exception as e:
             logger.error(f"Error in batch add: {str(e)}")
-            return 0
+        
+        return 0
     
     def search(
         self,
@@ -224,7 +294,7 @@ class RetrievalAgent:
         filter_metadata: Dict = None
     ) -> List[Dict[str, Any]]:
         """
-        Semantic search for documents
+        Semantic search for documents using aiXplain or ChromaDB
         
         Args:
             query: Search query
@@ -237,34 +307,56 @@ class RetrievalAgent:
         logger.info(f"Searching for: {query}")
         
         try:
-            # Create query embedding
-            query_embedding = self.create_embedding(query)
-            
-            if not query_embedding:
-                logger.error("Failed to create query embedding")
-                return []
-            
-            # Search
-            results = self.collection.query(
-                query_embeddings=[query_embedding],
-                n_results=top_k,
-                where=filter_metadata if filter_metadata else None
-            )
-            
-            # Format results
-            documents = []
-            if results['ids'] and len(results['ids']) > 0:
-                for i, doc_id in enumerate(results['ids'][0]):
-                    documents.append({
-                        'id': doc_id,
-                        'content': results['documents'][0][i] if results['documents'] else '',
-                        'metadata': results['metadatas'][0][i] if results['metadatas'] else {},
-                        'distance': results['distances'][0][i] if results['distances'] else 0
-                    })
-            
-            logger.success(f"Found {len(documents)} results")
-            return documents
-            
+            if self.use_aixplain and self.index:
+                # Use aiXplain Index search
+                results = self.index.search(
+                    query=query,
+                    number_of_results=top_k
+                )
+                
+                documents = []
+                if results and hasattr(results, 'results'):
+                    for result in results.results[:top_k]:
+                        documents.append({
+                            'id': getattr(result, 'reference_id', 'unknown'),
+                            'content': getattr(result, 'text', ''),
+                            'metadata': getattr(result, 'metadata', {}),
+                            'score': getattr(result, 'score', 0)
+                        })
+                
+                logger.success(f"Found {len(documents)} results via aiXplain")
+                return documents
+            else:
+                # Use ChromaDB fallback
+                if not self.collection:
+                    logger.error("No vector store available")
+                    return []
+                
+                query_embedding = self.create_embedding(query)
+                
+                if not query_embedding:
+                    logger.error("Failed to create query embedding")
+                    return []
+                
+                results = self.collection.query(
+                    query_embeddings=[query_embedding],
+                    n_results=top_k,
+                    where=filter_metadata if filter_metadata else None
+                )
+                
+                documents = []
+                if results['ids'] and len(results['ids']) > 0:
+                    for i, doc_id in enumerate(results['ids'][0]):
+                        documents.append({
+                            'id': doc_id,
+                            'content': results['documents'][0][i] if results['documents'] else '',
+                            'metadata': results['metadatas'][0][i] if results['metadatas'] else {},
+                            'distance': results['distances'][0][i] if results['distances'] else 0
+                        })
+                
+                logger.success(f"Found {len(documents)} results via ChromaDB")
+                return documents
+                
         except Exception as e:
             logger.error(f"Error searching: {str(e)}")
             return []

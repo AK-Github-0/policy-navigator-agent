@@ -1,11 +1,20 @@
 """
 Orchestrator Agent - Query routing and classification
+Uses aiXplain SDK AgentFactory for intelligent query routing
 Routes queries to appropriate agents based on type
 """
 
 from typing import Dict, Any, Tuple
 from loguru import logger
 from enum import Enum
+
+# Import aiXplain SDK components
+try:
+    from aixplain.factories import AgentFactory
+    AIXPLAIN_AVAILABLE = True
+except ImportError:
+    logger.warning("aiXplain SDK not available - using fallback mode")
+    AIXPLAIN_AVAILABLE = False
 
 
 class QueryType(Enum):
@@ -20,12 +29,13 @@ class QueryType(Enum):
 class OrchestratorAgent:
     """
     Agent responsible for query classification and routing
+    Uses aiXplain AgentFactory for intelligent routing
     Determines which agents should handle a query
     """
     
     def __init__(self, config):
         """
-        Initialize orchestrator agent
+        Initialize orchestrator agent with aiXplain routing
         
         Args:
             config: Configuration object
@@ -33,8 +43,27 @@ class OrchestratorAgent:
         logger.info("Initializing Orchestrator Agent")
         
         self.config = config
+        self.use_aixplain = AIXPLAIN_AVAILABLE
         
-        # Keywords for query classification
+        # Initialize aiXplain orchestration agent if available
+        if self.use_aixplain:
+            try:
+                logger.info("Initializing aiXplain AgentFactory for orchestration")
+                self.router_agent = AgentFactory.create(
+                    name="query_router_agent",
+                    description="Agent for intelligent query routing and classification",
+                    team_id=config.aixplain_team_id,
+                    api_key=config.aixplain_api_key
+                )
+                logger.success("aiXplain orchestration agent initialized")
+            except Exception as e:
+                logger.error(f"Error initializing aiXplain router: {str(e)}")
+                self.use_aixplain = False
+                self.router_agent = None
+        else:
+            self.router_agent = None
+        
+        # Keywords for query classification (used as fallback)
         self.policy_status_keywords = [
             'status', 'active', 'effective', 'deadline', 'when', 'date',
             'executive order', 'policy', 'rule', 'regulation'
@@ -54,7 +83,7 @@ class OrchestratorAgent:
     
     def classify_query(self, query: str) -> QueryType:
         """
-        Classify query type
+        Classify query type using aiXplain or keyword matching
         
         Args:
             query: User query
@@ -62,8 +91,35 @@ class OrchestratorAgent:
         Returns:
             QueryType: Classified query type
         """
-        logger.info(f"Classifying query: {query}")
+        logger.info(f"Classifying query: {query[:100]}...")
         
+        # Try aiXplain classification first
+        if self.use_aixplain and self.router_agent:
+            try:
+                logger.debug("Using aiXplain classification")
+                classification_prompt = f"""
+Classify this query into one of these categories:
+1. 'POLICY_STATUS' - Questions about policy status, effectiveness, deadlines
+2. 'CASE_LAW_SEARCH' - Questions about legal cases, court decisions, precedents
+3. 'COMPLIANCE_CHECK' - Questions about compliance requirements, obligations
+
+Query: {query}
+
+Respond with only the category name (exactly as shown above).
+"""
+                result = self.router_agent.run(classification_prompt)
+                classification = result.strip().upper()
+                
+                # Map result to QueryType
+                for query_type in QueryType:
+                    if query_type.value.upper() == classification:
+                        logger.success(f"Query classified as: {query_type.value}")
+                        return query_type
+            except Exception as e:
+                logger.warning(f"aiXplain classification failed: {str(e)}, falling back to keyword matching")
+        
+        # Fallback: Keyword-based classification
+        logger.debug("Using keyword-based classification")
         query_lower = query.lower()
         
         # Check compliance keywords
@@ -91,7 +147,7 @@ class OrchestratorAgent:
         query_type: QueryType
     ) -> Dict[str, Any]:
         """
-        Route query to appropriate agents
+        Route query to appropriate agents using aiXplain or heuristics
         
         Args:
             query: User query
@@ -109,35 +165,75 @@ class OrchestratorAgent:
             'parameters': {}
         }
         
+        # Try to use aiXplain for agent selection
+        if self.use_aixplain and self.router_agent:
+            try:
+                logger.debug("Using aiXplain for agent routing")
+                routing_prompt = f"""
+Based on this query type '{query_type.value}', which agents should handle this query?
+Available agents: retrieval_agent, api_agent, action_agent
+
+Query: {query}
+Type: {query_type.value}
+
+Return a comma-separated list of agent names (e.g., 'retrieval_agent,api_agent').
+"""
+                result = self.router_agent.run(routing_prompt)
+                agents = [a.strip() for a in result.split(',')]
+                routing['agents_to_call'] = agents
+                logger.debug(f"aiXplain suggested agents: {agents}")
+            except Exception as e:
+                logger.warning(f"aiXplain routing failed: {str(e)}, using heuristics")
+                routing['agents_to_call'] = self._get_default_agents(query_type)
+        else:
+            # Use heuristic-based routing
+            routing['agents_to_call'] = self._get_default_agents(query_type)
+        
+        # Set routing parameters based on query type
         if query_type == QueryType.POLICY_STATUS:
-            routing['agents_to_call'] = ['retrieval_agent', 'api_agent']
             routing['parameters'] = {
                 'search_query': query,
                 'api_operation': 'check_policy_status'
             }
         
         elif query_type == QueryType.CASE_LAW_SEARCH:
-            routing['agents_to_call'] = ['retrieval_agent', 'api_agent']
             routing['parameters'] = {
                 'search_query': query,
                 'api_operation': 'search_cases'
             }
         
         elif query_type == QueryType.COMPLIANCE_CHECK:
-            routing['agents_to_call'] = ['retrieval_agent', 'action_agent']
             routing['parameters'] = {
                 'search_query': query,
                 'action_type': 'send_compliance_checklist'
             }
         
         else:  # GENERAL_QUERY
-            routing['agents_to_call'] = ['retrieval_agent']
             routing['parameters'] = {
                 'search_query': query
             }
         
         logger.success(f"Query routed to: {routing['agents_to_call']}")
         return routing
+    
+    def _get_default_agents(self, query_type: QueryType) -> list:
+        """
+        Get default agents for a query type
+        
+        Args:
+            query_type: Query type
+            
+        Returns:
+            list: Default agents to call
+        """
+        if query_type == QueryType.POLICY_STATUS:
+            return ['retrieval_agent', 'api_agent']
+        elif query_type == QueryType.CASE_LAW_SEARCH:
+            return ['retrieval_agent', 'api_agent']
+        elif query_type == QueryType.COMPLIANCE_CHECK:
+            return ['retrieval_agent', 'action_agent']
+        else:  # GENERAL_QUERY
+            return ['retrieval_agent']
     
     def should_call_api_agent(self, query_type: QueryType) -> bool:
         """

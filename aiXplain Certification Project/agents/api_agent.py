@@ -1,5 +1,6 @@
 """
 API Agent - Handles external API integrations
+Uses aiXplain SDK for API management and external data source integration
 Integrates with Federal Register API and CourtListener API
 """
 
@@ -9,17 +10,27 @@ import requests
 from datetime import datetime
 import re
 
+# Import aiXplain SDK components
+try:
+    from aixplain.factories import AgentFactory
+    from aixplain.enums import Function
+    AIXPLAIN_AVAILABLE = True
+except ImportError:
+    logger.warning("aiXplain SDK not available - using fallback mode")
+    AIXPLAIN_AVAILABLE = False
+
 
 class APIAgent:
     """
     Agent responsible for querying external government APIs
+    Uses aiXplain SDK for API tool management
     - Federal Register API for policy status
     - CourtListener API for case law
     """
     
     def __init__(self, config):
         """
-        Initialize API agent with credentials
+        Initialize API agent with aiXplain and credentials
         
         Args:
             config: Configuration object with API keys
@@ -27,6 +38,7 @@ class APIAgent:
         logger.info("Initializing API Agent")
         
         self.config = config
+        self.use_aixplain = AIXPLAIN_AVAILABLE
         
         # API endpoints
         self.federal_register_base = "https://www.federalregister.gov/api/v1"
@@ -35,12 +47,33 @@ class APIAgent:
         # API keys
         self.federal_register_key = config.federal_register_api_key
         self.courtlistener_key = config.courtlistener_api_key
+        self.aixplain_api_key = config.aixplain_api_key
+        self.aixplain_team_id = config.aixplain_team_id
+        
+        # Initialize aiXplain agent if available
+        if self.use_aixplain:
+            try:
+                logger.info("Initializing aiXplain AgentFactory for API tools")
+                # Create or get API-enabled agent
+                self.aixplain_agent = AgentFactory.create(
+                    name="api_integration_agent",
+                    description="Agent for managing external API calls",
+                    team_id=self.aixplain_team_id,
+                    api_key=self.aixplain_api_key
+                )
+                logger.success("aiXplain API Agent initialized")
+            except Exception as e:
+                logger.error(f"Error initializing aiXplain agent: {str(e)}")
+                self.use_aixplain = False
+                self.aixplain_agent = None
+        else:
+            self.aixplain_agent = None
         
         logger.success("API Agent initialized")
     
     def check_policy_status(self, policy_identifier: str) -> Dict[str, Any]:
         """
-        Check policy status via Federal Register API
+        Check policy status via Federal Register API using aiXplain or direct call
         
         Args:
             policy_identifier: Policy name or executive order number
@@ -50,6 +83,39 @@ class APIAgent:
         """
         logger.info(f"Checking policy status: {policy_identifier}")
         
+        try:
+            if self.use_aixplain and self.aixplain_agent:
+                # Use aiXplain for API call management
+                logger.info("Querying policy status via aiXplain")
+                result = self._query_via_aixplain(
+                    f"Check the status of policy: {policy_identifier}",
+                    function_type="policy_check"
+                )
+                if result:
+                    return result
+            
+            # Fallback to direct API call
+            return self._check_policy_status_direct(policy_identifier)
+            
+        except Exception as e:
+            logger.error(f"Error checking policy status: {str(e)}")
+            return {
+                'status': 'ERROR',
+                'message': str(e),
+                'last_checked': datetime.now().isoformat(),
+                'source': 'API Agent'
+            }
+    
+    def _check_policy_status_direct(self, policy_identifier: str) -> Dict[str, Any]:
+        """
+        Direct Federal Register API call
+        
+        Args:
+            policy_identifier: Policy name or executive order number
+            
+        Returns:
+            dict: Policy status information
+        """
         try:
             # Extract executive order number if present
             eo_match = re.search(r'(\d{5})', policy_identifier)
@@ -113,6 +179,38 @@ class APIAgent:
                 'message': str(e),
                 'last_checked': datetime.now().isoformat()
             }
+    
+    def _query_via_aixplain(self, query: str, function_type: str = None) -> Dict[str, Any]:
+        """
+        Execute query via aiXplain agent
+        
+        Args:
+            query: Query string
+            function_type: Type of function to use
+            
+        Returns:
+            dict: Query results or None
+        """
+        try:
+            if not self.use_aixplain or not self.aixplain_agent:
+                return None
+            
+            logger.info(f"Executing query via aiXplain: {query}")
+            result = self.aixplain_agent.run(query)
+            
+            if result:
+                logger.success("aiXplain query executed successfully")
+                # Parse result and return as dict
+                return {
+                    'status': 'SUCCESS',
+                    'data': str(result),
+                    'source': 'aiXplain Agent',
+                    'last_checked': datetime.now().isoformat()
+                }
+            return None
+        except Exception as e:
+            logger.error(f"Error executing aiXplain query: {str(e)}")
+            return None
     
     def search_cases(
         self,
